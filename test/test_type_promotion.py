@@ -260,9 +260,8 @@ class TestTypePromotion(TestCase):
             self.assertEqual((bf + scalar).dtype, torch.bfloat16)
             self.assertEqual(scalar + bf, bf + scalar)
 
-        for scalar in (complex(1, 1), complex(-2, 0), complex(0, -3)):
-            self.assertEqual((bf + scalar).dtype, torch.cfloat)
-            self.assertEqual(bf + scalar, scalar + bf)
+        # Note (bcomplex32): not testing complex here as
+        # `torch.bcomplex32` is a shell dtype.
 
         # with tensor
         for dtype in all_types_and_complex_and(torch.half, torch.bfloat16, torch.bool):
