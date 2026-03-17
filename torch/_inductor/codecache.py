@@ -1586,7 +1586,9 @@ class FxGraphCache(GuardedCache[CompiledFxGraph]):
         """
         # Custom passes must implement the CustomGraphPass or we don't
         # know how to include them in the cache key calculation.
-        if config.pre_grad_pass_timing == "late":
+        # When timing is EARLY, pre-grad passes already ran before the cache
+        # lookup so there's nothing to validate here.
+        if config.pre_grad_pass_timing != "early":
             if config.pre_grad_custom_pass and (
                 not isinstance(config.pre_grad_custom_pass, CustomGraphPass)
                 or not config.pre_grad_custom_pass.uuid()
