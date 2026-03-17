@@ -1458,7 +1458,20 @@ class UserDefinedObjectVariable(UserDefinedVariable):
             # NOTE: else we assume the descriptor (if any) has a
             # side-effect-free `__set__` as far as Dynamo tracing is concerned.
 
-        # Emulate the standard setattr on instance dict.
+        # If the code reaches here, the attribute is either:
+        #  1) a slot descriptor
+        #  2) a plain attribute with no descriptor
+        # If the object has no __dict__, only slot descriptors (member_descriptor)
+        # allow mutation. Any other attribute assignment raises AttributeError.
+        if not self._hasattr_static("__dict__"):
+            descriptor = self.lookup_class_mro_attr(name_str)
+            if not inspect.ismemberdescriptor(descriptor):
+                error_msg = VariableTracker.build(
+                    tx,
+                    f"'{type(self.value).__name__}' object has no attribute '{name_str}'",
+                )
+                raise_observed_exception(AttributeError, tx, args=[error_msg])
+
         tx.output.side_effects.store_attr(self, name_str, value)
         return variables.CONSTANT_VARIABLE_NONE
 
@@ -1626,6 +1639,13 @@ class UserDefinedObjectVariable(UserDefinedVariable):
         self._looked_up_attrs[name] = subobj
         return subobj
 
+    def _hasattr_static(self, name: str) -> bool:
+        try:
+            self._getattr_static(name)
+            return True
+        except AttributeError:
+            return False
+
     def lookup_class_mro_attr(self, name: str) -> object:
         """Walk type(obj).__mro__ to find *name* in the class hierarchy.
 
@@ -1677,6 +1697,7 @@ class UserDefinedObjectVariable(UserDefinedVariable):
             mutated_attr = tx.output.side_effects.load_attr(self, key, deleted_ok=True)
             return not isinstance(mutated_attr, variables.DeletedVariable)
 
+        # TODO(guilhermeleobas): This can trigger a side effect
         return key in self.value.__dict__
 
     def get_source_by_walking_mro(
@@ -1795,6 +1816,8 @@ class UserDefinedObjectVariable(UserDefinedVariable):
             return result
 
         if name == "__dict__":
+            if not hasattr(self.value, "__dict__"):
+                raise_observed_exception(AttributeError, tx)
             return self.get_dict_vt(tx)
 
         # TODO(anijain2305) - Investigate if we need specialization for more
@@ -1836,6 +1859,8 @@ class UserDefinedObjectVariable(UserDefinedVariable):
             return self.resolve_data_descriptor(tx, name, type_attr, source)
 
         # Step 3: Instance __dict__ — return as-is, no descriptor invocation.
+        # TODO(guilhermeleobas): step 3 should look into dict_vt and not self.value.__dict__
+        # as the object could have mutated an attribute via setattr
         if hasattr(self.value, "__dict__") and name in self.value.__dict__:
             subobj = self.value.__dict__[name]
             source = self.maybe_wrap_nn_module_source_for_instance(tx, name, source)
