@@ -724,7 +724,12 @@ class MixOrderReductionTest(TestBase):
             self.assertFalse(MixOrderReduction.can_fuse(mock_node_1, mock_node_2))
         with (
             V.set_graph_handler(graph),
-            inductor_config.patch({"triton.mix_order_reduction_non_strict_mode": True}),
+            inductor_config.patch(
+                {
+                    "triton.mix_order_reduction_non_strict_mode": True,
+                    "split_reductions": False,
+                }
+            ),
         ):
             self.assertTrue(MixOrderReduction.can_fuse(mock_node_1, mock_node_2))
 
@@ -930,6 +935,57 @@ class MixOrderReductionTest(TestBase):
         loss = out.sum()
         loss.backward()
         self.assertTrue(metrics.codegen_mix_order_reduction > 1)
+
+    @inductor_config.patch("triton.mix_order_reduction", True)
+    @inductor_config.patch("triton.mix_order_reduction_non_strict_mode", True)
+    def test_dimension_refactoring_mismatch(self):
+        """
+        This reproduces an issue where `simplify_and_reorder()` produces a different
+        dimension factorization than `_original_ranges` used during fusion decision.
+        For example, fusion might see (13, 8472) but codegen sees (26, 4236) after
+        the reduction split optimization adds a factor of 2 to the pointwise dimensions.
+
+        We skip fusing split reductions for node1 in this case.
+        """
+
+        if not inductor_config.triton.mix_order_reduction:
+            self.skipTest("Mix order reduction not enabled")
+
+        # Reproduce the RMSNorm backward pattern that triggered the bug.
+        # The key is:
+        # - Shape (M, N) = (13, 8472) where N=8472 is large enough to trigger split
+        # - RMSNorm backward creates reductions along both dimensions
+        # - The feature dimension reduction (8472) gets split with factor 2
+        # - Mix order reduction tries to fuse these, but groups don't match after split
+        def f(x, w, eps):
+            orig_dtype = x.dtype
+            x = x.float()
+            # RMSNorm forward: y = x * rsqrt(mean(x^2) + eps) * w
+            rsqrt = torch.rsqrt((x * x).sum(dim=-1) / x.shape[-1] + eps)
+            y = (x * rsqrt[:, None] * w).to(dtype=orig_dtype)
+            return y
+
+        def fwd_bwd(compiled_f):
+            x.grad = None
+            w.grad = None
+            out = compiled_f(x, w, eps)
+            out.backward(dy)
+            return x.grad, w.grad
+
+        # Use the exact shape from the bug report: (13, 8472)
+        # 8472 = 2 * 4236, so split with factor 2 gives sub-reductions of 4236
+        M, N = 13, 8472
+        x = torch.randn(M, N, dtype=torch.float32, device=GPU_TYPE, requires_grad=True)
+        w = torch.randn(N, dtype=torch.float32, device=GPU_TYPE, requires_grad=True)
+        dy = torch.randn_like(x)
+        eps = 1e-5
+
+        opt_f = torch.compile(f)
+
+        ref = fwd_bwd(f)
+        act = fwd_bwd(opt_f)
+        torch.testing.assert_close(ref, act, atol=1e-3, rtol=1e-3)
+        self.assertGreaterEqual(metrics.codegen_mix_order_reduction, 0)
 
 
 @inductor_config.patch(
