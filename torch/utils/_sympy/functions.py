@@ -329,7 +329,7 @@ class ModularIndexing(sympy.Function):
             and isinstance(divisor, sympy.Integer)
             and isinstance(modulus, sympy.Integer)
         ):
-            return (base // divisor) % modulus
+            return Mod(FloorDiv(base, divisor), modulus)
 
         try:
             if divisor != 1:
